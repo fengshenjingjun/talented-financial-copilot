@@ -30,6 +30,7 @@ from storage.session import session_store
 from storage.history import history_store
 from observability.tracer import tracer
 from observability.metrics import metrics
+from utils.exception_handler import handle_exceptions
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,15 @@ def preprocess_node(state: FinancialAgentState) -> dict[str, Any]:
     }
 
 
+@handle_exceptions(
+    tier="complete",
+    fallback_value={
+        "final_response": "抱歉，系统暂时无法处理您的请求，请稍后再试。如需帮助，请联系客服热线。",
+        "error_flag": True,
+    },
+    metrics_key="workflow.pre_risk",
+    log_level="error",
+)
 def pre_risk_node(state: FinancialAgentState) -> dict[str, Any]:
     """前置风控：敏感词检测，命中则直接终止并返回拦截提示。"""
     user_text = _latest_user_text(state)
@@ -109,6 +119,12 @@ def pre_risk_node(state: FinancialAgentState) -> dict[str, Any]:
     }
 
 
+@handle_exceptions(
+    tier="complete",
+    fallback_value={},
+    metrics_key="workflow.router",
+    log_level="error",
+)
 def router_node(state: FinancialAgentState) -> dict[str, Any]:
     """三级意图识别 + 场景路由。"""
     if state.get("error_flag"):
@@ -143,22 +159,28 @@ def router_node(state: FinancialAgentState) -> dict[str, Any]:
     }
 
 
-def dispatch_node(state: FinancialAgentState) -> list[Send] | dict:
+def dispatch_node(state: FinancialAgentState) -> Command:
     """
-    分发节点：根据检测到的意图向对应Agent节点发送 Send 命令。
+    分发节点：根据检测到的意图向对应Agent节点发送 Command+Send 命令。
     多意图时并行触发多个Agent（LangGraph fan-out）。
     """
     if state.get("error_flag"):
-        return {}
+        # Skip agent nodes entirely, go straight to merge
+        return Command(goto="merge")
 
     intents = state.get("detected_intents", ["chat"])
-    sends = []
-    for intent in intents:
-        node_name = f"{intent}_node"
-        sends.append(Send(node_name, state))
-    return sends
+    sends = [Send(f"{intent}_node", state) for intent in intents]
+    return Command(goto=sends)
 
 
+@handle_exceptions(
+    tier="partial",
+    fallback_value={"agent_responses": {}, "tool_call_log": []},
+    metrics_key="workflow.stock_diagnosis",
+    scene_context="stock_diagnosis",
+    retry_count=1,
+    timeout_seconds=60,
+)
 def stock_diagnosis_node(state: FinancialAgentState) -> dict[str, Any]:
     """诊股 Agent 节点。"""
     user_text = _latest_user_text(state)
@@ -181,6 +203,14 @@ def stock_diagnosis_node(state: FinancialAgentState) -> dict[str, Any]:
     }
 
 
+@handle_exceptions(
+    tier="partial",
+    fallback_value={"agent_responses": {}, "tool_call_log": []},
+    metrics_key="workflow.stock_selection",
+    scene_context="stock_selection",
+    retry_count=1,
+    timeout_seconds=60,
+)
 def stock_selection_node(state: FinancialAgentState) -> dict[str, Any]:
     """选股 Agent 节点。"""
     user_text = _latest_user_text(state)
@@ -202,6 +232,14 @@ def stock_selection_node(state: FinancialAgentState) -> dict[str, Any]:
     }
 
 
+@handle_exceptions(
+    tier="partial",
+    fallback_value={"agent_responses": {}, "tool_call_log": []},
+    metrics_key="workflow.customer_service",
+    scene_context="customer_service",
+    retry_count=1,
+    timeout_seconds=60,
+)
 def customer_service_node(state: FinancialAgentState) -> dict[str, Any]:
     """客服 Agent 节点。"""
     user_text = _latest_user_text(state)
@@ -221,6 +259,12 @@ def customer_service_node(state: FinancialAgentState) -> dict[str, Any]:
     }
 
 
+@handle_exceptions(
+    tier="fallback",
+    fallback_value={"agent_responses": {"chat": "抱歉，我暂时无法回答，请稍后再试。"}},
+    metrics_key="workflow.chat",
+    scene_context="chat",
+)
 def chat_node(state: FinancialAgentState) -> dict[str, Any]:
     """闲聊 Agent 节点。"""
     user_text = _latest_user_text(state)
@@ -235,6 +279,11 @@ def chat_node(state: FinancialAgentState) -> dict[str, Any]:
     }
 
 
+@handle_exceptions(
+    tier="fallback",
+    fallback_value={"final_response": "抱歉，我暂时无法处理您的请求，请稍后重试。"},
+    metrics_key="workflow.merge",
+)
 def merge_node(state: FinancialAgentState) -> dict[str, Any]:
     """合并多Agent回复（多意图时拼接；单意图直接透传）。"""
     if state.get("error_flag"):
@@ -266,6 +315,12 @@ def merge_node(state: FinancialAgentState) -> dict[str, Any]:
     return {"final_response": raw}
 
 
+@handle_exceptions(
+    tier="complete",
+    fallback_value={},
+    metrics_key="workflow.post_risk",
+    log_level="error",
+)
 def post_risk_node(state: FinancialAgentState) -> dict[str, Any]:
     """后置风控：合规过滤 + 强制风险提示。"""
     if state.get("error_flag") and not state.get("final_response"):
@@ -293,6 +348,11 @@ def post_risk_node(state: FinancialAgentState) -> dict[str, Any]:
     }
 
 
+@handle_exceptions(
+    tier="fallback",
+    fallback_value={},
+    metrics_key="workflow.persist",
+)
 def persist_node(state: FinancialAgentState) -> dict[str, Any]:
     """持久化：更新 session store + 写入 dialog history。"""
     session_id = state["session_id"]
@@ -363,18 +423,7 @@ def build_graph() -> StateGraph:
     )
 
     graph.add_edge("router", "dispatch")
-
-    # dispatch uses Send → fan-out to agent nodes; all converge on "merge"
-    graph.add_conditional_edges(
-        "dispatch",
-        dispatch_node,
-        [
-            "stock_diagnosis_node",
-            "stock_selection_node",
-            "customer_service_node",
-            "chat_node",
-        ],
-    )
+    # dispatch_node returns Command(goto=...) which handles fan-out internally
 
     # All agent nodes → merge
     for node in [

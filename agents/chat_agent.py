@@ -6,10 +6,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
-from config.settings import settings
+from config.llm_factory import create_llm
 from config.prompts import PROMPTS
 
 logger = logging.getLogger(__name__)
@@ -17,11 +16,7 @@ logger = logging.getLogger(__name__)
 
 class ChatAgent:
     def __init__(self) -> None:
-        self._llm = ChatAnthropic(
-            model=settings.chat_model,
-            temperature=settings.chat_temperature,
-            api_key=settings.anthropic_api_key,
-        )
+        self._llm = create_llm(tier="chat")
 
     def run(
         self,

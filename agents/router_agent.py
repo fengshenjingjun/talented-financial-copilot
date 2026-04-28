@@ -11,10 +11,9 @@ import re
 import logging
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from config.settings import settings
+from config.llm_factory import create_llm
 from config.prompts import PROMPTS
 
 logger = logging.getLogger(__name__)
@@ -38,11 +37,7 @@ _STOCK_CODE_PATTERN = re.compile(r"\b([036]\d{5}|[68]\d{5})\b")
 
 class RouterAgent:
     def __init__(self) -> None:
-        self._llm = ChatAnthropic(
-            model=settings.router_model,
-            temperature=settings.router_temperature,
-            api_key=settings.anthropic_api_key,
-        )
+        self._llm = create_llm(tier="router")
 
     def route(self, user_text: str, current_scene: str, scene_history: list[str]) -> dict[str, Any]:
         """
