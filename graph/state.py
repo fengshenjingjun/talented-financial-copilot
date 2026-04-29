@@ -35,6 +35,10 @@ class FinancialAgentState(TypedDict):
     # ── Observability ──────────────────────────────────────────────────────────
     tool_call_log: Annotated[list[dict[str, Any]], _append_list]
 
+    # ── Structured output ─────────────────────────────────────────────────────
+    reasoning_trace: Annotated[list[dict[str, Any]], _append_list]
+    visualization_data: Annotated[list[dict[str, Any]], _append_list]
+
     # ── Risk control ──────────────────────────────────────────────────────────
     risk_check_result: Annotated[dict[str, Any], _merge_dict]
 

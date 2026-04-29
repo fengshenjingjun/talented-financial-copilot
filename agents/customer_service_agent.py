@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import time
 import logging
 from typing import Any
 
@@ -52,6 +53,15 @@ class CustomerServiceAgent:
         messages.append(HumanMessage(content=user_text))
 
         tool_calls_this_run: list[dict] = []
+        reasoning_steps: list[dict] = []
+
+        reasoning_steps.append({
+            "step_id": "step_001",
+            "timestamp": time.time(),
+            "type": "intent_detection",
+            "description": f"客服查询: {user_text[:60]}",
+            "details": {},
+        })
 
         response = self._llm.invoke(messages)
         messages.append(response)
@@ -63,7 +73,20 @@ class CustomerServiceAgent:
                 tool_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
                 tool_id = (tc.get("id") or "") if isinstance(tc, dict) else (getattr(tc, "id", "") or "")
 
+                step: dict[str, Any] = {
+                    "step_id": f"step_{len(reasoning_steps)+1:03d}",
+                    "timestamp": time.time(),
+                    "type": "tool_call",
+                    "description": f"检索知识库: {tool_name}",
+                    "details": {"tool_name": tool_name, "args": tool_args},
+                }
+                reasoning_steps.append(step)
+
+                t0 = time.time()
                 result = self._call_rag_tool(tool_name, tool_args)
+                step["details"]["duration_ms"] = int((time.time() - t0) * 1000)
+                step["details"]["result_summary"] = f"检索到 {len(str(result))} 字符" if not result.get("error") else f"错误: {result['error']}"
+
                 tool_calls_this_run.append({"tool": tool_name, "args": tool_args, "result": result})
                 messages.append(
                     ToolMessage(
@@ -73,11 +96,21 @@ class CustomerServiceAgent:
                 )
             response = self._llm.invoke(messages)
 
+        reasoning_steps.append({
+            "step_id": f"step_{len(reasoning_steps)+1:03d}",
+            "timestamp": time.time(),
+            "type": "synthesis",
+            "description": "基于知识库生成客服回答",
+            "details": {"tool_calls_count": len(tool_calls_this_run)},
+        })
+
         final_text = _str_content(response.content)
         return {
             "response": final_text,
             "tool_calls": tool_calls_this_run,
             "error": None,
+            "reasoning_steps": reasoning_steps,
+            "charts": [],
         }
 
     def _call_rag_tool(self, name: str, args: Any) -> dict:

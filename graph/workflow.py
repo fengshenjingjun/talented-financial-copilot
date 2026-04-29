@@ -200,6 +200,14 @@ def stock_diagnosis_node(state: FinancialAgentState) -> dict[str, Any]:
     return {
         "agent_responses": {"stock_diagnosis": result.get("response", "")},
         "tool_call_log": tool_log,
+        "reasoning_trace": [
+            {**step, "agent": "stock_diagnosis"}
+            for step in result.get("reasoning_steps", [])
+        ],
+        "visualization_data": [
+            {**chart, "agent": "stock_diagnosis"}
+            for chart in result.get("charts", [])
+        ],
     }
 
 
@@ -229,6 +237,14 @@ def stock_selection_node(state: FinancialAgentState) -> dict[str, Any]:
     return {
         "agent_responses": {"stock_selection": result.get("response", "")},
         "tool_call_log": tool_log,
+        "reasoning_trace": [
+            {**step, "agent": "stock_selection"}
+            for step in result.get("reasoning_steps", [])
+        ],
+        "visualization_data": [
+            {**chart, "agent": "stock_selection"}
+            for chart in result.get("charts", [])
+        ],
     }
 
 
@@ -256,6 +272,14 @@ def customer_service_node(state: FinancialAgentState) -> dict[str, Any]:
     return {
         "agent_responses": {"customer_service": result.get("response", "")},
         "tool_call_log": tool_log,
+        "reasoning_trace": [
+            {**step, "agent": "customer_service"}
+            for step in result.get("reasoning_steps", [])
+        ],
+        "visualization_data": [
+            {**chart, "agent": "customer_service"}
+            for chart in result.get("charts", [])
+        ],
     }
 
 
@@ -276,6 +300,11 @@ def chat_node(state: FinancialAgentState) -> dict[str, Any]:
 
     return {
         "agent_responses": {"chat": result.get("response", "")},
+        "reasoning_trace": [
+            {**step, "agent": "chat"}
+            for step in result.get("reasoning_steps", [])
+        ],
+        "visualization_data": [],
     }
 
 
@@ -312,7 +341,11 @@ def merge_node(state: FinancialAgentState) -> dict[str, Any]:
             parts.append(f"{label}\n{text}")
         raw = "\n\n---\n\n".join(parts)
 
-    return {"final_response": raw}
+    return {
+        "final_response": raw,
+        "reasoning_trace": [],    # already accumulated; return empty to avoid re-append
+        "visualization_data": [],
+    }
 
 
 @handle_exceptions(

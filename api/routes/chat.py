@@ -17,7 +17,6 @@ from graph.state import FinancialAgentState
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Module-level graph (compiled once on first request)
 _graph = None
 
 
@@ -40,6 +39,8 @@ def _build_state(request: ChatRequest, session_state: dict) -> FinancialAgentSta
         "temp_params": {},
         "user_context": session_state.get("user_context", {}),
         "tool_call_log": [],
+        "reasoning_trace": [],
+        "visualization_data": [],
         "risk_check_result": {},
         "error_flag": False,
         "error_message": "",
@@ -48,7 +49,6 @@ def _build_state(request: ChatRequest, session_state: dict) -> FinancialAgentSta
     }
 
 
-# In-memory session cache (keyed by session_id → last state snapshot)
 _session_cache: dict[str, dict] = {}
 
 
@@ -89,18 +89,15 @@ async def chat(request: ChatRequest) -> ChatResponse:
         latency_ms=round(latency_ms, 2),
         degraded=degraded,
         error=result.get("error_message") or None,
+        reasoning_trace=result.get("reasoning_trace", []),
+        visualization_data=result.get("visualization_data", []),
+        tool_call_log=result.get("tool_call_log", []),
     )
 
 
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest) -> StreamingResponse:
-    """SSE streaming chat endpoint.
-
-    Providers that support token-level streaming (Anthropic, OpenAI) emit
-    on_chat_model_stream events — tokens appear progressively.
-    Non-streaming providers (Qwen, etc.) don't emit those events, so we
-    fall back to sending the full response as one chunk when the graph finishes.
-    """
+    """SSE streaming chat endpoint."""
     graph = _get_graph()
     session_id = request.session_id or str(uuid.uuid4())
     prior_state = _session_cache.get(session_id, {})
@@ -116,17 +113,29 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 event_type = event.get("event", "")
                 event_name = event.get("name", "")
 
-                # Token-level streaming (Anthropic / OpenAI)
                 if event_type == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
-                        payload = json.dumps(
-                            {"token": chunk.content}, ensure_ascii=False
-                        )
+                        payload = json.dumps({"token": chunk.content}, ensure_ascii=False)
                         yield f"data: {payload}\n\n"
                         tokens_streamed += 1
 
-                # Graph finished — always fired at the end regardless of provider
+                elif event_type == "on_tool_start":
+                    payload = json.dumps({
+                        "event": "tool_call",
+                        "tool_name": event.get("name", ""),
+                        "status": "started",
+                    }, ensure_ascii=False)
+                    yield f"data: {payload}\n\n"
+
+                elif event_type == "on_tool_end":
+                    payload = json.dumps({
+                        "event": "tool_call",
+                        "tool_name": event.get("name", ""),
+                        "status": "completed",
+                    }, ensure_ascii=False)
+                    yield f"data: {payload}\n\n"
+
                 elif event_type == "on_chain_end" and event_name == "LangGraph":
                     output = event.get("data", {}).get("output", {})
                     final_response = output.get("final_response", "")
@@ -134,27 +143,33 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 
                     _update_session_cache(session_id, output)
 
-                    # If no streaming tokens arrived (e.g. Qwen / non-streaming
-                    # provider), send the full response as a single chunk now.
                     if tokens_streamed == 0 and final_response:
-                        payload = json.dumps(
-                            {"token": final_response}, ensure_ascii=False
-                        )
+                        payload = json.dumps({"token": final_response}, ensure_ascii=False)
                         yield f"data: {payload}\n\n"
 
-                    done_payload = json.dumps(
-                        {"done": True, "session_id": session_id, "scene": scene},
-                        ensure_ascii=False,
-                    )
+                    reasoning_trace = output.get("reasoning_trace", [])
+                    visualization_data = output.get("visualization_data", [])
+
+                    for step in reasoning_trace:
+                        yield f"data: {json.dumps({'event': 'reasoning_step', 'step': step}, ensure_ascii=False)}\n\n"
+
+                    for chart in visualization_data:
+                        yield f"data: {json.dumps({'event': 'chart_data', 'chart': chart}, ensure_ascii=False)}\n\n"
+
+                    done_payload = json.dumps({
+                        "done": True,
+                        "session_id": session_id,
+                        "scene": scene,
+                        "reasoning_trace": reasoning_trace,
+                        "visualization_data": visualization_data,
+                        "tool_call_log": output.get("tool_call_log", []),
+                    }, ensure_ascii=False)
                     yield f"data: {done_payload}\n\n"
                     finished = True
 
-            # Safety net: if astream_events ended without on_chain_end "LangGraph"
-            # (can happen with some LangGraph builds), fall back to invoke.
             if not finished:
                 logger.warning(
-                    "astream_events ended without LangGraph on_chain_end for "
-                    "session %s — falling back to invoke",
+                    "astream_events ended without LangGraph on_chain_end for session %s — falling back to invoke",
                     session_id,
                 )
                 result = graph.invoke(state)
@@ -165,7 +180,15 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 if final_response:
                     yield f"data: {json.dumps({'token': final_response}, ensure_ascii=False)}\n\n"
 
-                yield f"data: {json.dumps({'done': True, 'session_id': session_id, 'scene': scene}, ensure_ascii=False)}\n\n"
+                done_payload = json.dumps({
+                    "done": True,
+                    "session_id": session_id,
+                    "scene": scene,
+                    "reasoning_trace": result.get("reasoning_trace", []),
+                    "visualization_data": result.get("visualization_data", []),
+                    "tool_call_log": result.get("tool_call_log", []),
+                }, ensure_ascii=False)
+                yield f"data: {done_payload}\n\n"
 
         except Exception as exc:
             logger.exception("SSE stream error for session %s", session_id)

@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import time
 import logging
 from typing import Any
 
@@ -34,12 +35,31 @@ class ChatAgent:
 
         messages.append(HumanMessage(content=user_text))
 
+        reasoning_steps = [
+            {
+                "step_id": "step_001",
+                "timestamp": time.time(),
+                "type": "intent_detection",
+                "description": f"闲聊对话: {user_text[:60]}",
+                "details": {},
+            }
+        ]
+
         try:
             response = self._llm.invoke(messages)
+            reasoning_steps.append({
+                "step_id": "step_002",
+                "timestamp": time.time(),
+                "type": "synthesis",
+                "description": "生成对话回复",
+                "details": {},
+            })
             return {
                 "response": response.content,
                 "tool_calls": [],
                 "error": None,
+                "reasoning_steps": reasoning_steps,
+                "charts": [],
             }
         except Exception as exc:
             logger.exception("Chat agent failed")
@@ -47,4 +67,6 @@ class ChatAgent:
                 "response": "抱歉，我暂时无法回答，请稍后再试。",
                 "tool_calls": [],
                 "error": str(exc),
+                "reasoning_steps": reasoning_steps,
+                "charts": [],
             }

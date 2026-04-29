@@ -1,5 +1,8 @@
 import React from 'react'
 import ReactMarkdown from 'react-markdown'
+import CollapsibleThinking from './CollapsibleThinking'
+import ChartRenderer from './ChartRenderer'
+import FeedbackButtons from './FeedbackButtons'
 
 const SCENE_LABELS = {
   stock_diagnosis: '个股分析',
@@ -9,8 +12,13 @@ const SCENE_LABELS = {
   unknown: '',
 }
 
-export default function MessageBubble({ message }) {
-  const { role, content, degraded, scene } = message
+export default function MessageBubble({ message, sessionId }) {
+  const {
+    role, content, degraded, scene, id,
+    reasoning_trace = [],
+    visualization_data = [],
+    tool_call_log = [],
+  } = message
 
   if (role === 'error') {
     return (
@@ -21,6 +29,8 @@ export default function MessageBubble({ message }) {
   }
 
   const isUser = role === 'user'
+  const hasThinking = !isUser && (reasoning_trace.length > 0 || tool_call_log.length > 0)
+  const hasCharts = !isUser && visualization_data.length > 0
 
   return (
     <div className={`bubble-row ${isUser ? 'bubble-row--user' : 'bubble-row--assistant'}`}>
@@ -34,6 +44,14 @@ export default function MessageBubble({ message }) {
         {!isUser && scene && SCENE_LABELS[scene] && (
           <div className="bubble__scene-tag">{SCENE_LABELS[scene]}</div>
         )}
+
+        {hasThinking && (
+          <CollapsibleThinking
+            reasoningTrace={reasoning_trace}
+            toolCallLog={tool_call_log}
+          />
+        )}
+
         <div className="bubble__content">
           {isUser ? (
             <span>{content}</span>
@@ -41,6 +59,26 @@ export default function MessageBubble({ message }) {
             <ReactMarkdown>{content}</ReactMarkdown>
           )}
         </div>
+
+        {hasCharts && (
+          <div className="bubble__charts">
+            {visualization_data.map(chart => (
+              <ChartRenderer
+                key={chart.chart_id}
+                chartId={chart.chart_id}
+                chartData={chart.data}
+                title={chart.title}
+              />
+            ))}
+          </div>
+        )}
+
+        {!isUser && (
+          <FeedbackButtons
+            messageId={String(id)}
+            sessionId={sessionId}
+          />
+        )}
       </div>
     </div>
   )

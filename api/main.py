@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from api.middleware import register_middleware
 from api.routes.chat import router as chat_router
 from api.routes.metrics import router as metrics_router
+from api.routes.feedback import router as feedback_router
 from api.websocket import websocket_chat
 
 app = FastAPI(
@@ -33,6 +34,7 @@ register_middleware(app)
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(chat_router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
+app.include_router(feedback_router, prefix="/api")
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────

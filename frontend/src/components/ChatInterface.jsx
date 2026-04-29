@@ -58,7 +58,7 @@ export default function ChatInterface({
           </div>
         )}
         {messages.map(msg => (
-          <MessageBubble key={msg.id} message={msg} />
+          <MessageBubble key={msg.id} message={msg} sessionId={sessionId} />
         ))}
         {isLoading && (
           <div className="bubble-row bubble-row--assistant">
