@@ -15,6 +15,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from config.llm_factory import create_llm
 from config.prompts import PROMPTS
+from security.prompt_armor import PromptArmor
 
 logger = logging.getLogger(__name__)
 
@@ -121,12 +122,13 @@ class RouterAgent:
     ) -> dict[str, Any]:
         context_hint = ""
         if current_scene and current_scene != "unknown":
-            context_hint = f"\n\n当前会话场景：{current_scene}，历史场景：{scene_history[-3:]}"
+            context_hint = f"当前会话场景：{current_scene}，历史场景：{scene_history[-3:]}"
 
-        messages = [
-            SystemMessage(content=PROMPTS["router_system"]),
-            HumanMessage(content=f"用户输入：{text}{context_hint}"),
-        ]
+        armor = PromptArmor(core_prompt=PROMPTS["router_system"])
+        messages = armor.build(
+            user_text=text,
+            context=context_hint,
+        )
         try:
             response = self._llm.invoke(messages)
             raw = response.content.strip()

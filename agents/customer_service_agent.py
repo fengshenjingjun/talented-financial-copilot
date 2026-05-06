@@ -13,6 +13,8 @@ from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AI
 from config.llm_factory import create_llm
 from config.prompts import PROMPTS
 from tools.rag_tools import RAG_TOOLS
+from security.prompt_armor import PromptArmor
+from security.tool_guard import tool_guard
 
 logger = logging.getLogger(__name__)
 
@@ -40,17 +42,11 @@ class CustomerServiceAgent:
         user_text: str,
         dialog_history: list[dict],
     ) -> dict[str, Any]:
-        messages = [SystemMessage(content=PROMPTS["customer_service_system"])]
-
-        for turn in dialog_history[-4:]:
-            role = turn.get("role", "user")
-            content = _str_content(turn.get("content", ""))
-            if role == "user":
-                messages.append(HumanMessage(content=content))
-            else:
-                messages.append(AIMessage(content=content))
-
-        messages.append(HumanMessage(content=user_text))
+        armor = PromptArmor(core_prompt=PROMPTS["customer_service_system"])
+        messages = armor.build(
+            user_text=user_text,
+            history=dialog_history[-4:],
+        )
 
         tool_calls_this_run: list[dict] = []
         reasoning_steps: list[dict] = []
@@ -113,7 +109,7 @@ class CustomerServiceAgent:
             "charts": [],
         }
 
-    def _call_rag_tool(self, name: str, args: Any) -> dict:
+    def _call_rag_tool(self, name: str, args: Any, session_id: str = "global") -> dict:
         from tools.rag_tools import search_faq, search_research_reports, search_knowledge_base
         _map = {
             "search_faq": search_faq,
@@ -130,7 +126,14 @@ class CustomerServiceAgent:
                 args = {}
         elif not isinstance(args, dict):
             args = {}
+
+        # Layer 3: Tool Guard validation
+        check = tool_guard.validate_call(session_id, name, args)
+        if not check["ok"]:
+            return {"error": check["reason"], "tool": name}
+
         try:
-            return fn.invoke(args)
+            result = fn.invoke(args)
+            return tool_guard.sanitise_return(name, result)
         except Exception as exc:
             return {"error": str(exc)}

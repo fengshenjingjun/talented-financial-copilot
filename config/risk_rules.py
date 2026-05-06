@@ -42,4 +42,18 @@ RISK_RULES = {
         "customer_service": ["search_faq"],
         "chat": [],                                     # no mandatory tools
     },
+
+    # ── Prompt-injection detection rules ──────────────────────────────────────
+    "prompt_injection": {
+        # Heuristic score thresholds (0-100)
+        "block_threshold": 70,
+        "warn_threshold": 40,
+        "max_input_length": 8000,
+
+        # Additional scene-specific injection keywords beyond the built-in lexicon
+        "extra_keywords": [],
+
+        # Whether to auto-block sessions that trigger audit-guard critical alerts
+        "auto_block_on_anomaly": True,
+    },
 }

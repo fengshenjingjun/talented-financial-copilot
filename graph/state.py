@@ -42,6 +42,9 @@ class FinancialAgentState(TypedDict):
     # ── Risk control ──────────────────────────────────────────────────────────
     risk_check_result: Annotated[dict[str, Any], _merge_dict]
 
+    # ── Security layer (prompt-injection defence) ─────────────────────────────
+    security_check_result: Annotated[dict[str, Any], _merge_dict]
+
     # ── Error handling ────────────────────────────────────────────────────────
     error_flag: bool
     error_message: str

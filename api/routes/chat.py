@@ -13,9 +13,17 @@ from langchain_core.messages import HumanMessage
 
 from api.schemas import ChatRequest, ChatResponse
 from graph.state import FinancialAgentState
+from security.input_guard import InputGuard
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_input_guard = InputGuard()
+
+# Only stream tokens from these nodes; router/risk nodes output internal JSON
+_STREAMING_NODES = frozenset({
+    "chat_node", "stock_diagnosis_node",
+    "stock_selection_node", "customer_service_node",
+})
 
 _graph = None
 
@@ -42,11 +50,23 @@ def _build_state(request: ChatRequest, session_state: dict) -> FinancialAgentSta
         "reasoning_trace": [],
         "visualization_data": [],
         "risk_check_result": {},
+        "security_check_result": {},
         "error_flag": False,
         "error_message": "",
         "agent_responses": {},
         "final_response": "",
     }
+
+
+def _api_input_guard_check(message: str) -> tuple[bool, str]:
+    """Fast API-layer input guard check. Returns (ok, block_reason)."""
+    result = _input_guard.scan(message)
+    if result.action == "block":
+        return False, (
+            "检测到输入包含可疑的攻击特征，为了保障系统安全，该请求已被拦截。"
+            "如有疑问请联系客服。"
+        )
+    return True, ""
 
 
 _session_cache: dict[str, dict] = {}
@@ -64,6 +84,18 @@ def _update_session_cache(session_id: str, output: dict) -> None:
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
     """Single-turn synchronous chat endpoint."""
+    # API-layer input guard (Layer 1 defence — early exit)
+    ok, block_reason = _api_input_guard_check(request.message)
+    if not ok:
+        return ChatResponse(
+            response=block_reason,
+            session_id=request.session_id or str(uuid.uuid4()),
+            scene="blocked",
+            latency_ms=0.0,
+            degraded=False,
+            error="input_guard_blocked",
+        )
+
     graph = _get_graph()
     session_id = request.session_id or str(uuid.uuid4())
 
@@ -98,6 +130,20 @@ async def chat(request: ChatRequest) -> ChatResponse:
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest) -> StreamingResponse:
     """SSE streaming chat endpoint."""
+    # API-layer input guard (Layer 1 defence — early exit)
+    ok, block_reason = _api_input_guard_check(request.message)
+    if not ok:
+        async def _blocked_stream() -> AsyncGenerator[str, None]:
+            payload = json.dumps({"token": block_reason}, ensure_ascii=False)
+            yield f"data: {payload}\n\n"
+            done = json.dumps({"done": True, "error": "input_guard_blocked"}, ensure_ascii=False)
+            yield f"data: {done}\n\n"
+        return StreamingResponse(
+            _blocked_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     graph = _get_graph()
     session_id = request.session_id or str(uuid.uuid4())
     prior_state = _session_cache.get(session_id, {})
@@ -114,6 +160,9 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 event_name = event.get("name", "")
 
                 if event_type == "on_chat_model_stream":
+                    node = event.get("metadata", {}).get("langgraph_node", "")
+                    if node not in _STREAMING_NODES:
+                        continue
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
                         payload = json.dumps({"token": chunk.content}, ensure_ascii=False)

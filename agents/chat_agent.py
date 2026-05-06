@@ -11,6 +11,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from config.llm_factory import create_llm
 from config.prompts import PROMPTS
+from security.prompt_armor import PromptArmor
 
 logger = logging.getLogger(__name__)
 
@@ -24,16 +25,11 @@ class ChatAgent:
         user_text: str,
         dialog_history: list[dict],
     ) -> dict[str, Any]:
-        messages = [SystemMessage(content=PROMPTS["chat_system"])]
-
-        for turn in dialog_history[-6:]:
-            role = turn.get("role", "user")
-            if role == "user":
-                messages.append(HumanMessage(content=turn["content"]))
-            else:
-                messages.append(AIMessage(content=turn["content"]))
-
-        messages.append(HumanMessage(content=user_text))
+        armor = PromptArmor(core_prompt=PROMPTS["chat_system"])
+        messages = armor.build(
+            user_text=user_text,
+            history=dialog_history[-6:],
+        )
 
         reasoning_steps = [
             {

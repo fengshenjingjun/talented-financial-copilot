@@ -26,6 +26,8 @@ from agents.customer_service_agent import CustomerServiceAgent
 from agents.chat_agent import ChatAgent
 from risk.pre_filter import pre_filter
 from risk.post_filter import post_filter
+from security.input_guard import InputGuard, InputGuardResult
+from security.audit_guard import audit_guard
 from storage.session import session_store
 from storage.history import history_store
 from observability.tracer import tracer
@@ -40,6 +42,7 @@ _stock_diagnosis = StockDiagnosisAgent()
 _stock_selection = StockSelectionAgent()
 _customer_service = CustomerServiceAgent()
 _chat = ChatAgent()
+_input_guard = InputGuard()
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -116,6 +119,66 @@ def pre_risk_node(state: FinancialAgentState) -> dict[str, Any]:
 
     return {
         "risk_check_result": {"pre_passed": True},
+    }
+
+
+@handle_exceptions(
+    tier="complete",
+    fallback_value={
+        "final_response": "检测到潜在的安全风险，请求已被拦截。如有疑问请联系客服。",
+        "error_flag": True,
+    },
+    metrics_key="workflow.input_guard",
+    log_level="error",
+)
+def input_guard_node(state: FinancialAgentState) -> dict[str, Any]:
+    """第一层安全：输入层防护 — 提示词注入检测与拦截。"""
+    user_text = _latest_user_text(state)
+    result = _input_guard.scan(user_text)
+
+    session_id = state["session_id"]
+    user_id = state.get("user_id", "anonymous")
+
+    # Record in audit guard
+    audit_guard.start_session(session_id, user_id)
+    audit_guard.record_input_guard(session_id, result.score, blocked=not result.passed)
+
+    tracer.log_risk_event(
+        session_id, "input_guard",
+        blocked=not result.passed,
+        reason="; ".join(result.reasons) if result.reasons else "clean",
+    )
+
+    if result.action == "block":
+        metrics.risk_blocked("input_guard")
+        block_msg = (
+            "检测到输入包含可疑的攻击特征，为了保障系统安全，该请求已被拦截。"
+            "如有疑问请联系客服。"
+        )
+        return {
+            "security_check_result": {
+                "input_guard_passed": False,
+                "input_guard_score": result.score,
+                "input_guard_reasons": result.reasons,
+            },
+            "final_response": block_msg,
+            "error_flag": True,
+            "error_message": f"input_guard_blocked: {'; '.join(result.reasons)}",
+        }
+
+    if result.action == "warn":
+        metrics.inc("security.input_guard.warn")
+        logger.warning(
+            "InputGuard warning for session=%s score=%d reasons=%s",
+            session_id, result.score, result.reasons,
+        )
+
+    return {
+        "security_check_result": {
+            "input_guard_passed": True,
+            "input_guard_score": result.score,
+            "input_guard_reasons": result.reasons,
+        },
     }
 
 
@@ -423,6 +486,40 @@ def error_handler_node(state: FinancialAgentState) -> dict[str, Any]:
     return {}
 
 
+@handle_exceptions(
+    tier="fallback",
+    fallback_value={},
+    metrics_key="workflow.audit",
+)
+def audit_node(state: FinancialAgentState) -> dict[str, Any]:
+    """第四层安全：行为审计与异常检测。"""
+    session_id = state["session_id"]
+
+    # Record final response length for anomaly detection
+    final_response = state.get("final_response", "")
+    audit_guard.record_response(session_id, final_response)
+
+    # Audit all tool calls from this turn
+    for tc in state.get("tool_call_log", []):
+        audit_guard.record_tool_call(
+            session_id=session_id,
+            tool_name=tc.get("tool", tc.get("name", "unknown")),
+            args=tc.get("args", {}),
+            success=not tc.get("result", {}).get("error") if isinstance(tc.get("result"), dict) else True,
+            error=tc.get("result", {}).get("error") if isinstance(tc.get("result"), dict) else None,
+        )
+
+    # Check if session has been blocked by audit guard anomaly rules
+    if audit_guard.is_session_blocked(session_id):
+        return {
+            "final_response": "系统检测到异常行为，该会话已被临时锁定。请联系客服解锁。",
+            "error_flag": True,
+            "error_message": "session_blocked_by_audit_guard",
+        }
+
+    return {}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Graph construction
 # ══════════════════════════════════════════════════════════════════════════════
@@ -432,6 +529,7 @@ def build_graph() -> StateGraph:
 
     # ── Register nodes ────────────────────────────────────────────────────────
     graph.add_node("preprocess", preprocess_node)
+    graph.add_node("input_guard", input_guard_node)
     graph.add_node("pre_risk", pre_risk_node)
     graph.add_node("router", router_node)
     graph.add_node("dispatch", dispatch_node)
@@ -441,12 +539,20 @@ def build_graph() -> StateGraph:
     graph.add_node("chat_node", chat_node)
     graph.add_node("merge", merge_node)
     graph.add_node("post_risk", post_risk_node)
+    graph.add_node("audit", audit_node)
     graph.add_node("persist", persist_node)
     graph.add_node("error_handler", error_handler_node)
 
     # ── Linear edges ─────────────────────────────────────────────────────────
     graph.add_edge(START, "preprocess")
-    graph.add_edge("preprocess", "pre_risk")
+    graph.add_edge("preprocess", "input_guard")
+
+    # After input_guard: if blocked, skip to error_handler; else continue to pre_risk
+    graph.add_conditional_edges(
+        "input_guard",
+        lambda s: "error_handler" if s.get("error_flag") else "pre_risk",
+        {"pre_risk": "pre_risk", "error_handler": "error_handler"},
+    )
 
     # After pre_risk: if blocked, skip to error_handler; else continue to router
     graph.add_conditional_edges(
@@ -468,7 +574,15 @@ def build_graph() -> StateGraph:
         graph.add_edge(node, "merge")
 
     graph.add_edge("merge", "post_risk")
-    graph.add_edge("post_risk", "persist")
+    graph.add_edge("post_risk", "audit")
+
+    # After audit: if blocked, skip to error_handler; else continue to persist
+    graph.add_conditional_edges(
+        "audit",
+        lambda s: "error_handler" if s.get("error_flag") else "persist",
+        {"persist": "persist", "error_handler": "error_handler"},
+    )
+
     graph.add_edge("persist", END)
     graph.add_edge("error_handler", END)
 

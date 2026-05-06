@@ -14,6 +14,8 @@ from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AI
 from config.llm_factory import create_llm
 from config.prompts import PROMPTS
 from tools.financial_tools import FINANCIAL_TOOLS
+from security.prompt_armor import PromptArmor
+from security.tool_guard import tool_guard, PermissionLevel, ToolSchema, ParamRule
 
 logger = logging.getLogger(__name__)
 
@@ -116,18 +118,15 @@ class StockDiagnosisAgent:
         dialog_history: list[dict],
         tool_call_log: list[dict],
     ) -> dict[str, Any]:
-        messages = [SystemMessage(content=PROMPTS["stock_diagnosis_system"])]
-
-        for turn in dialog_history[-4:]:
-            role = turn.get("role", "user")
-            content = _str_content(turn.get("content", ""))
-            if role == "user":
-                messages.append(HumanMessage(content=content))
-            else:
-                messages.append(AIMessage(content=content))
-
         hint = f"（股票代码：{', '.join(stock_codes)}）" if stock_codes else ""
-        messages.append(HumanMessage(content=f"{user_text}{hint}"))
+        context = f"当前分析目标股票代码：{', '.join(stock_codes)}" if stock_codes else ""
+
+        armor = PromptArmor(core_prompt=PROMPTS["stock_diagnosis_system"])
+        messages = armor.build(
+            user_text=f"{user_text}{hint}",
+            history=dialog_history[-4:],
+            context=context,
+        )
 
         tool_calls_this_run: list[dict] = []
         reasoning_steps: list[dict] = []
@@ -207,7 +206,7 @@ class StockDiagnosisAgent:
             "charts": charts,
         }
 
-    def _call_tool(self, name: str, args: Any) -> dict:
+    def _call_tool(self, name: str, args: Any, session_id: str = "global") -> dict:
         from tools.financial_tools import (
             get_stock_quote, get_financial_report, get_valuation,
             get_sector_data, get_stock_screening,
@@ -229,8 +228,15 @@ class StockDiagnosisAgent:
                 args = {}
         elif not isinstance(args, dict):
             args = {}
+
+        # Layer 3: Tool Guard validation
+        check = tool_guard.validate_call(session_id, name, args)
+        if not check["ok"]:
+            return {"error": check["reason"], "tool": name}
+
         try:
-            return fn.invoke(args)
+            result = fn.invoke(args)
+            return tool_guard.sanitise_return(name, result)
         except Exception as exc:
             logger.warning("Tool %s failed: %s", name, exc)
             return {"error": str(exc)}

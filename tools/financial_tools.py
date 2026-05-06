@@ -183,3 +183,56 @@ FINANCIAL_TOOLS = [
     get_sector_data,
     get_stock_screening,
 ]
+
+# ── Register Tool Guard schemas (Layer 3 defence) ────────────────────────────
+# These schemas enforce parameter validation and permission levels even if
+# the LLM is tricked into emitting malicious tool calls.
+from security.tool_guard import tool_guard, PermissionLevel, ToolSchema, ParamRule
+
+tool_guard.register(ToolSchema(
+    name="get_stock_quote",
+    permission=PermissionLevel.READ,
+    params=[
+        ParamRule(name="stock_code", required=True, type_=str, regex=r"^[0-9]{6}$"),
+    ],
+    allowed_return_keys=["stock_code", "name", "price", "change_pct", "pe", "pb", "roe", "market_cap", "industry", "data_source", "error"],
+))
+
+tool_guard.register(ToolSchema(
+    name="get_financial_report",
+    permission=PermissionLevel.READ,
+    params=[
+        ParamRule(name="stock_code", required=True, type_=str, regex=r"^[0-9]{6}$"),
+        ParamRule(name="period", required=False, type_=str, allowed_values=["latest", "2023", "2022"]),
+    ],
+    allowed_return_keys=["stock_code", "name", "period", "revenue_yoy", "net_profit_yoy", "roe", "debt_ratio", "data_source", "error"],
+))
+
+tool_guard.register(ToolSchema(
+    name="get_valuation",
+    permission=PermissionLevel.READ,
+    params=[
+        ParamRule(name="stock_code", required=True, type_=str, regex=r"^[0-9]{6}$"),
+    ],
+    allowed_return_keys=["stock_code", "name", "pe", "pb", "industry", "industry_pe_median", "valuation_comment", "data_source", "error"],
+))
+
+tool_guard.register(ToolSchema(
+    name="get_sector_data",
+    permission=PermissionLevel.READ,
+    params=[
+        ParamRule(name="sector_name", required=True, type_=str, max_length=50),
+    ],
+    allowed_return_keys=["sector", "change_pct", "turnover", "volume_ratio", "north_flow", "pe_median", "top_stocks", "sentiment", "data_source", "error"],
+))
+
+tool_guard.register(ToolSchema(
+    name="get_stock_screening",
+    permission=PermissionLevel.READ,
+    params=[
+        ParamRule(name="min_roe", required=False, type_=(int, float), min_value=-100.0, max_value=100.0),
+        ParamRule(name="max_pe", required=False, type_=(int, float), min_value=0.0, max_value=5000.0),
+        ParamRule(name="industry", required=False, type_=str, max_length=50),
+    ],
+    allowed_return_keys=["query", "count", "sample", "note", "data_source", "error"],
+))
